@@ -4,11 +4,11 @@
   "description": "",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "worker": "tsx watch src/worker.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "worker": "tsx watch --env-file-if-exists=.env src/worker.ts",
     "build": "tsc && node -e \"require('fs').cpSync('src/db','dist/db',{recursive:true})\"",
-    "start": "node dist/index.js",
-    "start:worker": "node dist/worker.js",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "start:worker": "node --env-file-if-exists=.env dist/worker.js",
     "test": "tsx --test src/**/*.test.ts"
   },
   "keywords": [],
