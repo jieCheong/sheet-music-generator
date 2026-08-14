@@ -38,21 +38,19 @@ Render service settings:
   needs both `server/` and `ml/`, so it can't build from `server/` alone.
 
 <a id="worker-note"></a>
-**Worker note:** the BullMQ worker is meant to run combined into the same
-process as the API (per the [design](docs/superpowers/specs/2026-08-13-server-transcription-pipeline-design.md)),
-so a single Render Web Service can run everything on the free tier — Render
-doesn't reliably offer a free separate background-worker service. This
-Dockerfile's `CMD` (`node dist/index.js`) is already correct for that; it
-just needs `src/index.ts` to actually start the worker in-process once the
-pipeline (`queue.ts`, `worker.ts`, `db.ts`, routes) is implemented. Until
-then, the deployed service has no `/transcribe` routes.
+**Worker note:** `src/worker.ts` exports `startWorker()` and runs standalone
+via `npm run worker` for local dev (two processes, matching docker-compose).
+For Render's single free Web Service, set `RUN_WORKER_INLINE=true` so
+`index.ts` starts the worker in-process instead — no Dockerfile change
+needed, `CMD ["node", "dist/index.js"]` already covers both cases.
 
 | Variable | Value | Notes |
 |---|---|---|
 | `PORT` | — | Set automatically by Render; already read via `process.env.PORT` in `src/index.ts`. |
 | `CLIENT_ORIGIN` | e.g. `https://sheet-music-app.vercel.app` | CORS allow-origin, already wired in `src/index.ts`. Omit only for local dev (defaults to `*`). |
-| `DATABASE_URL` | Postgres connection string from Neon/Supabase | Consumed by the pending `src/db.ts`. |
-| `REDIS_URL` | Redis connection string from Upstash (`rediss://...`) | Consumed by the pending `src/queue.ts`. Upstash requires TLS — use the `rediss://` URL it gives you; `ioredis` (which BullMQ uses) enables TLS automatically for that scheme. |
+| `DATABASE_URL` | Postgres connection string from Neon/Supabase | Consumed by `src/db.ts`. |
+| `REDIS_URL` | Redis connection string from Upstash (`rediss://...`) | Consumed by `src/queue.ts`. Upstash requires TLS — use the `rediss://` URL it gives you; `ioredis` (which BullMQ uses) enables TLS automatically for that scheme. |
+| `RUN_WORKER_INLINE` | `true` | Starts the worker in-process alongside the API. Required on Render (see Worker note above). Leave unset for local dev. |
 
 ## Data stores
 
@@ -83,8 +81,8 @@ then, the deployed service has no `/transcribe` routes.
   and its transitive deps. Expect slower builds/deploys than a typical
   Node-only service; stay mindful of Render's free tier's monthly build-minute
   cap.
-- **Combined process**: because the worker runs in the same container as the
-  API (see [Worker note](#worker-note)), a crash in the Python pipeline
-  subprocess must not be allowed to take down the Express process — the
-  worker implementation needs to catch and record failures per-job, not let
-  them propagate.
+- **Combined process**: with `RUN_WORKER_INLINE=true`, the worker runs in
+  the same container as the API (see [Worker note](#worker-note)). BullMQ's
+  `Worker` already catches per-job errors and emits `failed` rather than
+  crashing the process, and `worker.ts`'s `failed` handler records them to
+  Postgres — a bad transcription doesn't take down the API.
