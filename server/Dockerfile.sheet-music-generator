@@ -1,0 +1,44 @@
+# Build context must be the repository root (this Dockerfile needs both
+# server/ and ml/). On Render: set "Dockerfile Path" to
+# server/Dockerfile.sheet-music-generator and "Docker Build Context
+# Directory" to the repo root.
+
+# ---- Stage 1: compile the TypeScript server ----
+FROM node:20-bookworm-slim AS server-build
+WORKDIR /app/server
+COPY server/package.json server/package-lock.json ./
+RUN npm ci
+COPY server/tsconfig.json ./
+COPY server/src ./src
+RUN npm run build
+
+# ---- Stage 2: runtime image (Node + Python pipeline) ----
+FROM node:20-bookworm-slim AS runtime
+
+# Debian bookworm ships Python 3.11 by default, matching ml/'s requirement
+# (basic-pitch's TensorFlow dependency has no wheel for newer Pythons yet).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Python pipeline: build the venv in its own layer so it's only
+# rebuilt when requirements.txt actually changes.
+COPY ml/requirements.txt ./ml/requirements.txt
+RUN python3 -m venv /app/ml/.venv \
+    && /app/ml/.venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /app/ml/.venv/bin/pip install --no-cache-dir -r ml/requirements.txt
+COPY ml/transcribe.py ml/notation.py ml/diagnostics.py ./ml/
+
+# Node server: production deps + compiled output only (no source/devDeps).
+WORKDIR /app/server
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --omit=dev
+COPY --from=server-build /app/server/dist ./dist
+
+ENV NODE_ENV=production
+# Render injects PORT; src/index.ts already reads process.env.PORT.
+EXPOSE 3010
+
+CMD ["node", "dist/index.js"]

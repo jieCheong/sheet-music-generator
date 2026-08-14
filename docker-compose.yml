@@ -1,0 +1,27 @@
+# Local dev only (Postgres + Redis for server/). Isolated on purpose from
+# other projects that may be running on this machine: unique compose
+# project name, smg-prefixed container names, and host ports that don't
+# collide with common defaults (5432/6379) other projects tend to use.
+name: sheet-music-generator
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: smg-postgres
+    environment:
+      POSTGRES_USER: smg
+      POSTGRES_PASSWORD: smg
+      POSTGRES_DB: sheet_music
+    ports:
+      - "5433:5432"
+    volumes:
+      - smg_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: smg-redis
+    ports:
+      - "6380:6379"
+
+volumes:
+  smg_postgres_data:

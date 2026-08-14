@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# generated
+ml/output/
+
+# env files (keep .env.example tracked)
+.env
+!.env.example
