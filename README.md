@@ -105,6 +105,13 @@ Prints each note event (pitch, start time, end time, velocity) to the
 console and writes the full list as JSON to `ml/output/notes.json`. Use
 `--output <path>` to write elsewhere.
 
+`--onset-threshold` / `--frame-threshold` (both basic-pitch defaults: 0.5 /
+0.3) control how confident a detection must be to count as a note — raise
+either to suppress spurious/false-positive notes on noisy transcriptions.
+On a real test video, raising both (0.65 / 0.4) cut note count 22% and
+roughly halved implausible-register outliers; see `diagnostics.py` below
+for how to check whether a transcription needs this.
+
 ### notation.py
 
 Turns `output/notes.json` into a notated, two-staff `music21` Score:
