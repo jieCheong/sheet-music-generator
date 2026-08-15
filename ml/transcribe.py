@@ -29,8 +29,12 @@ def download_audio(url: str, dest_dir: Path) -> Path:
     return audio_path
 
 
-def transcribe(audio_path: Path) -> list[dict]:
-    _, _, raw_note_events = predict(str(audio_path))
+def transcribe(audio_path: Path, onset_threshold: float, frame_threshold: float) -> list[dict]:
+    _, _, raw_note_events = predict(
+        str(audio_path),
+        onset_threshold=onset_threshold,
+        frame_threshold=frame_threshold,
+    )
 
     notes = [
         {
@@ -54,6 +58,20 @@ def main() -> None:
         default=SCRIPT_DIR / "output" / "notes.json",
         help="Path to write the note events JSON (default: output/notes.json)",
     )
+    parser.add_argument(
+        "--onset-threshold",
+        type=float,
+        default=0.5,
+        help="Minimum energy required for a note onset to be considered present "
+        "(default: 0.5, basic-pitch's default). Raise to suppress spurious notes.",
+    )
+    parser.add_argument(
+        "--frame-threshold",
+        type=float,
+        default=0.3,
+        help="Minimum energy required for a frame to be considered present "
+        "(default: 0.3, basic-pitch's default). Raise to suppress spurious notes.",
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -61,7 +79,7 @@ def main() -> None:
         audio_path = download_audio(args.url, Path(tmp_dir))
 
         print("Running basic-pitch prediction...")
-        notes = transcribe(audio_path)
+        notes = transcribe(audio_path, args.onset_threshold, args.frame_threshold)
 
     print(f"\nFound {len(notes)} note events:\n")
     for note in notes:
