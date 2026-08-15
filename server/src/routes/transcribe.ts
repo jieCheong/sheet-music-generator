@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { getJob, insertJob } from "../db.js";
-import { transcribeQueue } from "../queue.js";
+import { getJob, insertJob, markFailed } from "../db.js";
+import { enqueueTranscribeJob } from "../queue.js";
 import { validateYoutubeUrl } from "../validation.js";
 
 export const transcribeRouter = Router();
@@ -20,11 +20,16 @@ transcribeRouter.post("/transcribe", async (req, res) => {
 
   const jobId = randomUUID();
   await insertJob(jobId, body.youtubeUrl, body.instrument);
-  await transcribeQueue.add(
-    "transcribe",
-    { youtubeUrl: body.youtubeUrl, instrument: body.instrument },
-    { jobId, attempts: 1 },
-  );
+
+  try {
+    await enqueueTranscribeJob(jobId, { youtubeUrl: body.youtubeUrl, instrument: body.instrument });
+  } catch (err) {
+    // Redis was unreachable/slow: don't leave the row stuck at "queued"
+    // forever with no worker ever going to see it.
+    await markFailed(jobId, `Failed to queue job: ${err instanceof Error ? err.message : String(err)}`);
+    res.status(503).json({ error: "Unable to queue transcription job right now, please try again" });
+    return;
+  }
 
   res.status(202).json({ jobId });
 });
