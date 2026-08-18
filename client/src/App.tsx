@@ -9,6 +9,15 @@ const INSTRUMENT = "piano";
 const POLL_INTERVAL_MS = 2000;
 const A4_WIDTH_MM = 210;
 const A4_HEIGHT_MM = 297;
+// OSMD lays out pagination (systems per page) based on the actual pixel
+// width of the element it renders into -- not just visual CSS scaling. A
+// narrow viewport fed directly to OSMD as its render width makes it think
+// an A4 page is only that many pixels wide, so far fewer systems fit per
+// page (confirmed: 10 pages at 900px vs. 71 at 350px for the same piece,
+// mostly near-empty). Always rendering at this fixed width, then scaling
+// the result down with a CSS transform for narrow screens, keeps
+// pagination identical regardless of viewport.
+const OSMD_RENDER_WIDTH = 850;
 
 type AppState =
   | { phase: "idle" }
@@ -25,7 +34,11 @@ function App() {
   const [url, setUrl] = useState("");
   const [state, setState] = useState<AppState>({ phase: "idle" });
   const [downloadingPdf, setDownloadingPdf] = useState(false);
-  const osmdContainerRef = useRef<HTMLDivElement>(null);
+  // scaleWrapperRef: the visible, responsive box (width scales with the page).
+  // renderTargetRef: fixed-width child OSMD actually renders into; scaled
+  // down via CSS transform to fit inside scaleWrapperRef.
+  const scaleWrapperRef = useRef<HTMLDivElement>(null);
+  const renderTargetRef = useRef<HTMLDivElement>(null);
 
   const pollingJobId = state.phase === "polling" ? state.jobId : null;
 
@@ -63,14 +76,33 @@ function App() {
 
   const completedMusicXml = state.phase === "completed" ? state.musicxml : null;
 
+  // Scales renderTargetRef (fixed OSMD_RENDER_WIDTH) down to fit
+  // scaleWrapperRef's actual available width, and sets the wrapper's height
+  // to match -- a CSS transform doesn't affect layout flow, so without this
+  // the wrapper would either clip the scaled-down content or leave the
+  // original (unscaled) empty space beneath it.
+  const rescale = () => {
+    const wrapper = scaleWrapperRef.current;
+    const target = renderTargetRef.current;
+    if (!wrapper || !target) return;
+
+    const style = getComputedStyle(wrapper);
+    const paddingX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const paddingY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+
+    const scale = Math.min(1, (wrapper.clientWidth - paddingX) / OSMD_RENDER_WIDTH);
+    target.style.transform = `scale(${scale})`;
+    wrapper.style.height = `${target.scrollHeight * scale + paddingY}px`;
+  };
+
   useEffect(() => {
-    if (completedMusicXml === null || !osmdContainerRef.current) return;
+    if (completedMusicXml === null || !renderTargetRef.current) return;
 
     let cancelled = false;
-    const container = osmdContainerRef.current;
-    container.innerHTML = "";
+    const target = renderTargetRef.current;
+    target.innerHTML = "";
 
-    const osmd = new OpenSheetMusicDisplay(container, { autoResize: true, pageFormat: "A4_P" });
+    const osmd = new OpenSheetMusicDisplay(target, { autoResize: false, pageFormat: "A4_P" });
     // Default (4) renders titles at a fixed size that doesn't shrink to fit
     // the page -- an overlong title just overflows off the edge. notation.py
     // also caps title length at the source, but this is a second line of
@@ -80,7 +112,9 @@ function App() {
     osmd
       .load(completedMusicXml)
       .then(() => {
-        if (!cancelled) osmd.render();
+        if (cancelled) return;
+        osmd.render();
+        rescale();
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -91,6 +125,12 @@ function App() {
     return () => {
       cancelled = true;
     };
+  }, [completedMusicXml]);
+
+  useEffect(() => {
+    if (completedMusicXml === null) return;
+    window.addEventListener("resize", rescale);
+    return () => window.removeEventListener("resize", rescale);
   }, [completedMusicXml]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -108,11 +148,11 @@ function App() {
   };
 
   const handleDownloadPdf = async () => {
-    const container = osmdContainerRef.current;
-    if (!container) return;
+    const target = renderTargetRef.current;
+    if (!target) return;
 
     // OSMD (pageFormat: "A4_P") renders one <svg> per page.
-    const pages = Array.from(container.querySelectorAll("svg"));
+    const pages = Array.from(target.querySelectorAll("svg"));
     if (pages.length === 0) return;
 
     setDownloadingPdf(true);
@@ -174,7 +214,9 @@ function App() {
         </button>
       )}
 
-      <div ref={osmdContainerRef} className="score-container" hidden={state.phase !== "completed"} />
+      <div ref={scaleWrapperRef} className="score-container" hidden={state.phase !== "completed"}>
+        <div ref={renderTargetRef} className="score-render-target" style={{ width: OSMD_RENDER_WIDTH }} />
+      </div>
     </main>
   );
 }

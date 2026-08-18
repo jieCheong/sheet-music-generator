@@ -85,16 +85,17 @@
   box-shadow: var(--shadow);
   padding: 16px;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
-/* OSMD (pageFormat: "A4_P") renders one fixed-size A4 <svg> per page.
-   Without this, a page wider than the container just overflowed and got
-   cut off instead of shrinking to fit -- unreadable on any screen
-   narrower than an A4 page's native render width. */
-.score-container svg {
-  display: block;
-  width: 100%;
-  height: auto;
+/* Rendered at a fixed pixel width (see OSMD_RENDER_WIDTH) regardless of
+   viewport, so OSMD's pagination (systems per page) is always computed the
+   same way -- a narrow render width makes OSMD think an A4 page is only
+   that many pixels wide and fit far fewer systems per page, not just
+   render smaller. App.tsx scales this down to fit .score-container via a
+   CSS transform computed from the actual available width. */
+.score-render-target {
+  transform-origin: top left;
 }
 
 .download-pdf {
