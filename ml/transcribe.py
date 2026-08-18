@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import librosa
 import yt_dlp
 from basic_pitch.inference import predict
 
@@ -72,6 +73,15 @@ def download_audio(
     return audio_path, clean_title(info.get("title") or "Untitled")
 
 
+def detect_tempo(audio_path: Path) -> float:
+    """Was previously never done at all -- notation.py always defaulted to
+    120 BPM regardless of the actual song, which misaligns every quantized
+    note against the real beat grid whenever the song isn't close to 120."""
+    y, sr = librosa.load(str(audio_path), sr=None)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    return round(float(tempo), 1)
+
+
 def transcribe(audio_path: Path, onset_threshold: float, frame_threshold: float) -> list[dict]:
     _, _, raw_note_events = predict(
         str(audio_path),
@@ -134,6 +144,10 @@ def main() -> None:
         print(f"Downloading audio from {args.url}...")
         audio_path, title = download_audio(args.url, Path(tmp_dir), args.cookies_from_browser)
 
+        print("Detecting tempo...")
+        tempo_bpm = detect_tempo(audio_path)
+        print(f"Detected tempo: {tempo_bpm} BPM")
+
         print("Running basic-pitch prediction...")
         notes = transcribe(audio_path, args.onset_threshold, args.frame_threshold)
 
@@ -147,7 +161,7 @@ def main() -> None:
         )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps({"title": title, "notes": notes}, indent=2))
+    args.output.write_text(json.dumps({"title": title, "tempo": tempo_bpm, "notes": notes}, indent=2))
     print(f"\nSaved {len(notes)} note events to {args.output}")
 
 

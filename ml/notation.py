@@ -3,9 +3,10 @@
 
 import argparse
 import json
+from collections import defaultdict
 from pathlib import Path
 
-from music21 import clef, layout, meter, metadata, note, stream, tempo
+from music21 import chord, clef, layout, meter, metadata, note, stream, tempo
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MIDDLE_C = 60
@@ -47,9 +48,32 @@ def build_score(quantized: stream.Stream, detected_key, tempo_bpm: float, title:
     bass.insert(0, detected_key)
     bass.insert(0, meter.TimeSignature("4/4"))
 
+    # Group simultaneous notes (same staff, same quantized offset+duration)
+    # into a single Chord instead of inserting each as an independent Note
+    # at the same offset. Without this, basic-pitch's raw polyphonic output
+    # -- which has no concept of "these pitches are one chord" -- left
+    # every simultaneous pitch as its own overlapping Note, and music21's
+    # MusicXML writer resolved the ambiguity by auto-splitting them into as
+    # many as 5-6 separate voices per measure (most holding a single
+    # whole-measure rest) to avoid silently overlapping notes. That's what
+    # produced illegible, collision-heavy engraving: inconsistent stems,
+    # rests scattered outside the staff, notes reading as "floating" --
+    # not wrong pitches or bad rhythm, just far more simultaneous voices
+    # than real piano notation ever uses for a chord.
+    treble_groups: dict[tuple[float, float], list[int]] = defaultdict(list)
+    bass_groups: dict[tuple[float, float], list[int]] = defaultdict(list)
     for n in quantized.notes:
-        target = treble if n.pitch.midi >= MIDDLE_C else bass
-        target.insert(n.offset, note.Note(n.pitch, quarterLength=n.duration.quarterLength))
+        groups = treble_groups if n.pitch.midi >= MIDDLE_C else bass_groups
+        groups[(n.offset, n.duration.quarterLength)].append(n.pitch.midi)
+
+    for target, groups in ((treble, treble_groups), (bass, bass_groups)):
+        for (offset, quarter_length), pitches in groups.items():
+            element = (
+                chord.Chord(pitches, quarterLength=quarter_length)
+                if len(pitches) > 1
+                else note.Note(pitches[0], quarterLength=quarter_length)
+            )
+            target.insert(offset, element)
 
     staff_group = layout.StaffGroup([treble, bass], name="Piano", symbol="brace")
 
@@ -83,8 +107,10 @@ def main() -> None:
     parser.add_argument(
         "--tempo",
         type=float,
-        default=120.0,
-        help="Tempo in BPM, used to convert note event seconds into beats (default: 120)",
+        default=None,
+        help="Tempo in BPM, used to convert note event seconds into beats. Defaults to "
+        "the tempo transcribe.py detected from the audio (stored in --input); falls "
+        "back to 120 only if that's missing (e.g. an older notes.json).",
     )
     parser.add_argument(
         "--grid",
@@ -99,15 +125,16 @@ def main() -> None:
     data = json.loads(args.input.read_text())
     notes = data["notes"]
     title = data.get("title") or "Untitled"
+    tempo_bpm = args.tempo if args.tempo is not None else data.get("tempo", 120.0)
     if not notes:
         raise SystemExit(f"No notes found in {args.input}")
 
-    quantized = quantize_to_stream(notes, args.tempo, args.grid)
+    quantized = quantize_to_stream(notes, tempo_bpm, args.grid)
 
     detected_key = quantized.analyze("key")
     print(f"Detected key: {detected_key}")
 
-    score = build_score(quantized, detected_key, args.tempo, title)
+    score = build_score(quantized, detected_key, tempo_bpm, title)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     score.write("musicxml", fp=str(args.output))
