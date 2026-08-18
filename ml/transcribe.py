@@ -29,7 +29,10 @@ def normalize_youtube_url(url: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
-def download_audio(url: str, dest_dir: Path, cookies_from_browser: str | None = None) -> Path:
+def download_audio(
+    url: str, dest_dir: Path, cookies_from_browser: str | None = None
+) -> tuple[Path, str]:
+    """Returns (audio_path, video_title)."""
     url = normalize_youtube_url(url)
     ydl_opts = {
         "format": "bestaudio/best",
@@ -45,12 +48,12 @@ def download_audio(url: str, dest_dir: Path, cookies_from_browser: str | None = 
         ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+        info = ydl.extract_info(url, download=True)
 
     audio_path = dest_dir / "audio.wav"
     if not audio_path.exists():
         raise RuntimeError("yt-dlp did not produce an audio file")
-    return audio_path
+    return audio_path, info.get("title") or "Untitled"
 
 
 def transcribe(audio_path: Path, onset_threshold: float, frame_threshold: float) -> list[dict]:
@@ -85,16 +88,20 @@ def main() -> None:
     parser.add_argument(
         "--onset-threshold",
         type=float,
-        default=0.5,
+        default=0.75,
         help="Minimum energy required for a note onset to be considered present "
-        "(default: 0.5, basic-pitch's default). Raise to suppress spurious notes.",
+        "(default: 0.75 -- raised from basic-pitch's own 0.5 default; real-video "
+        "testing showed 0.5 producing implausible-register false positives, and "
+        "0.75 was the point where those largely disappeared without losing real "
+        "notes). Raise further to suppress spurious notes, lower for quiet passages.",
     )
     parser.add_argument(
         "--frame-threshold",
         type=float,
-        default=0.3,
+        default=0.5,
         help="Minimum energy required for a frame to be considered present "
-        "(default: 0.3, basic-pitch's default). Raise to suppress spurious notes.",
+        "(default: 0.5 -- raised from basic-pitch's own 0.3 default, same "
+        "reasoning as --onset-threshold). Raise to suppress spurious notes.",
     )
     parser.add_argument(
         "--cookies-from-browser",
@@ -109,7 +116,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         print(f"Downloading audio from {args.url}...")
-        audio_path = download_audio(args.url, Path(tmp_dir), args.cookies_from_browser)
+        audio_path, title = download_audio(args.url, Path(tmp_dir), args.cookies_from_browser)
 
         print("Running basic-pitch prediction...")
         notes = transcribe(audio_path, args.onset_threshold, args.frame_threshold)
@@ -124,7 +131,7 @@ def main() -> None:
         )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(notes, indent=2))
+    args.output.write_text(json.dumps({"title": title, "notes": notes}, indent=2))
     print(f"\nSaved {len(notes)} note events to {args.output}")
 
 

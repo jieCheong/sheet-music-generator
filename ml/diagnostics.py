@@ -26,10 +26,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    notes = json.loads(args.input.read_text())
+    data = json.loads(args.input.read_text())
+    notes = data["notes"]
     if not notes:
         raise SystemExit(f"No notes found in {args.input}")
 
+    print(f"Title:              {data.get('title') or 'Untitled'}")
     durations = [n["end_time"] - n["start_time"] for n in notes]
     pitches = [n["pitch"] for n in notes]
 
