@@ -80,7 +80,16 @@ export async function runPipeline(jobId: string, youtubeUrl: string): Promise<{ 
   const notesPath = path.join(jobDir, "notes.json");
   const musicxmlPath = path.join(jobDir, "score.musicxml");
 
-  await runPythonScript(TRANSCRIBE_SCRIPT, [youtubeUrl, "--output", notesPath]);
+  const transcribeArgs = [youtubeUrl, "--output", notesPath];
+  // Local-dev-only escape hatch for YouTube's bot detection: reads cookies
+  // from a real logged-in browser on this machine. Never set in production
+  // (Render has no browser/user session to read from).
+  const cookiesFromBrowser = process.env.YT_DLP_COOKIES_BROWSER;
+  if (cookiesFromBrowser) {
+    transcribeArgs.push("--cookies-from-browser", cookiesFromBrowser);
+  }
+
+  await runPythonScript(TRANSCRIBE_SCRIPT, transcribeArgs);
   await runPythonScript(NOTATION_SCRIPT, ["--input", notesPath, "--output", musicxmlPath]);
 
   return { musicxmlPath };

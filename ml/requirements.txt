@@ -2,3 +2,4 @@ yt-dlp
 basic-pitch
 music21
 setuptools<81  # resampy (a basic-pitch dep) imports pkg_resources without declaring it
+pycryptodomex  # decrypts Chromium cookies for --cookies-from-browser (Windows)
