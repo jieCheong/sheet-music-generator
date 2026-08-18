@@ -18,14 +18,36 @@ function resolvePythonPath(): string {
     : path.join(ML_DIR, ".venv", "bin", "python");
 }
 
+// Line-buffers a child stream and logs each line with a prefix, so a job's
+// progress (e.g. transcribe.py's "Downloading audio...", "Running
+// basic-pitch prediction...") shows up live in the worker's own log instead
+// of only being visible by inspecting the OS process directly.
+function logWithPrefix(stream: NodeJS.ReadableStream, prefix: string): void {
+  let buffer = "";
+  stream.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString();
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.trim()) console.log(`[${prefix}] ${line}`);
+    }
+  });
+  stream.on("end", () => {
+    if (buffer.trim()) console.log(`[${prefix}] ${buffer}`);
+  });
+}
+
 function runPythonScript(scriptPath: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(resolvePythonPath(), [scriptPath, ...args], { timeout: CHILD_TIMEOUT_MS });
+    const label = path.basename(scriptPath);
 
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
+    logWithPrefix(child.stdout, label);
+    logWithPrefix(child.stderr, `${label} stderr`);
 
     child.on("error", (err) => reject(err));
 
