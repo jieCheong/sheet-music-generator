@@ -1,3 +1,5 @@
+import { jsPDF } from "jspdf";
+import "svg2pdf.js";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import "./App.css";
@@ -5,6 +7,8 @@ import { getJobStatus, submitTranscription, type JobStatus } from "./api";
 
 const INSTRUMENT = "piano";
 const POLL_INTERVAL_MS = 2000;
+const A4_WIDTH_MM = 210;
+const A4_HEIGHT_MM = 297;
 
 type AppState =
   | { phase: "idle" }
@@ -20,6 +24,7 @@ function errorMessage(err: unknown): string {
 function App() {
   const [url, setUrl] = useState("");
   const [state, setState] = useState<AppState>({ phase: "idle" });
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const osmdContainerRef = useRef<HTMLDivElement>(null);
 
   const pollingJobId = state.phase === "polling" ? state.jobId : null;
@@ -65,7 +70,7 @@ function App() {
     const container = osmdContainerRef.current;
     container.innerHTML = "";
 
-    const osmd = new OpenSheetMusicDisplay(container, { autoResize: true });
+    const osmd = new OpenSheetMusicDisplay(container, { autoResize: true, pageFormat: "A4_P" });
 
     osmd
       .load(completedMusicXml)
@@ -94,6 +99,31 @@ function App() {
       setState({ phase: "polling", jobId, status: "queued" });
     } catch (err) {
       setState({ phase: "failed", error: errorMessage(err) });
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    const container = osmdContainerRef.current;
+    if (!container) return;
+
+    // OSMD (pageFormat: "A4_P") renders one <svg> per page.
+    const pages = Array.from(container.querySelectorAll("svg"));
+    if (pages.length === 0) return;
+
+    setDownloadingPdf(true);
+    try {
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+      for (let i = 0; i < pages.length; i++) {
+        if (i > 0) doc.addPage();
+        await doc.svg(pages[i], { x: 0, y: 0, width: A4_WIDTH_MM, height: A4_HEIGHT_MM });
+      }
+
+      doc.save("sheet-music.pdf");
+    } catch (err) {
+      setState({ phase: "failed", error: `Failed to generate PDF: ${errorMessage(err)}` });
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -134,8 +164,8 @@ function App() {
       )}
 
       {state.phase === "completed" && (
-        <button type="button" className="download-pdf" onClick={() => window.print()}>
-          Download PDF
+        <button type="button" className="download-pdf" onClick={handleDownloadPdf} disabled={downloadingPdf}>
+          {downloadingPdf ? "Preparing PDF..." : "Download PDF"}
         </button>
       )}
 
