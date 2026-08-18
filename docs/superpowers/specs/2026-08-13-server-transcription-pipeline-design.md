@@ -100,8 +100,10 @@ type exactly — the client was already built against this contract.
 - No automatic BullMQ retries (`attempts: 1`) — these failures are
   deterministic; retrying just re-runs a multi-minute ML pipeline for the
   same result.
-- Each child process is wrapped in a generous hard timeout (10 minutes) as
-  a safety net against a hung download or inference call.
+- Each child process is wrapped in a generous hard timeout (20 minutes —
+  revised up from an initial 10 after real-world testing showed a ~5 minute
+  video's CPU-bound basic-pitch inference alone exceeding 10 minutes under
+  normal load) as a safety net against a hung download or inference call.
 
 ## Testing
 

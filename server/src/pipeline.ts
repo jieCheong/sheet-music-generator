@@ -9,7 +9,12 @@ const ML_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..
 const TRANSCRIBE_SCRIPT = path.join(ML_DIR, "transcribe.py");
 const NOTATION_SCRIPT = path.join(ML_DIR, "notation.py");
 
-const CHILD_TIMEOUT_MS = 10 * 60 * 1000; // spec: "generous hard timeout (10 minutes)"
+// basic-pitch's inference is CPU-bound and scales with audio length; a real
+// ~5 minute video took >10 minutes under normal machine load (downloads
+// finish in seconds -- inference is where the time goes), so 10 minutes
+// wasn't actually "generous" for anything but short clips. 20 minutes
+// still bounds a genuine hang while giving longer videos real headroom.
+const CHILD_TIMEOUT_MS = 20 * 60 * 1000;
 const STDERR_EXCERPT_LIMIT = 2000;
 
 function resolvePythonPath(): string {
