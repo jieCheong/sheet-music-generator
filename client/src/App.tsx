@@ -133,6 +133,12 @@ function App() {
         </div>
       )}
 
+      {state.phase === "completed" && (
+        <button type="button" className="download-pdf" onClick={() => window.print()}>
+          Download PDF
+        </button>
+      )}
+
       <div ref={osmdContainerRef} className="score-container" hidden={state.phase !== "completed"} />
     </main>
   );

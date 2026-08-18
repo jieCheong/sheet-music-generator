@@ -87,3 +87,35 @@
   box-sizing: border-box;
   overflow-x: auto;
 }
+
+.download-pdf {
+  font: inherit;
+  padding: 10px 18px;
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+/* "Download PDF" prints via the browser's native print-to-PDF, using
+   OSMD's vector SVG output for clean results with no extra dependency.
+   Isolate the score container so the form/buttons don't end up in the
+   PDF. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .score-container,
+  .score-container * {
+    visibility: visible;
+  }
+  .score-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    box-shadow: none;
+    border-radius: 0;
+  }
+}
