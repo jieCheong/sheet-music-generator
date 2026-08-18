@@ -71,6 +71,11 @@ function App() {
     container.innerHTML = "";
 
     const osmd = new OpenSheetMusicDisplay(container, { autoResize: true, pageFormat: "A4_P" });
+    // Default (4) renders titles at a fixed size that doesn't shrink to fit
+    // the page -- an overlong title just overflows off the edge. notation.py
+    // also caps title length at the source, but this is a second line of
+    // defense for any title that still doesn't fit.
+    osmd.EngravingRules.SheetTitleHeight = 2.5;
 
     osmd
       .load(completedMusicXml)

@@ -85,7 +85,16 @@
   box-shadow: var(--shadow);
   padding: 16px;
   box-sizing: border-box;
-  overflow-x: auto;
+}
+
+/* OSMD (pageFormat: "A4_P") renders one fixed-size A4 <svg> per page.
+   Without this, a page wider than the container just overflowed and got
+   cut off instead of shrinking to fit -- unreadable on any screen
+   narrower than an A4 page's native render width. */
+.score-container svg {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 .download-pdf {

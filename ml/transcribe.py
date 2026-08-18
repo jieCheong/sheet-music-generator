@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import re
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -29,6 +30,21 @@ def normalize_youtube_url(url: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
+MAX_TITLE_LENGTH = 40
+
+
+def clean_title(raw_title: str) -> str:
+    """YouTube titles are often longer than a sheet music title should be
+    (channel branding, "Official Video", "| Piano with Sheet Music", etc.),
+    and OSMD renders the title at a fixed size that doesn't shrink to fit --
+    an overlong title just overflows off the page. Trim at the first common
+    clutter separator, then hard-cap the length as a backstop."""
+    title = re.split(r"[|([]", raw_title)[0].strip()
+    if len(title) > MAX_TITLE_LENGTH:
+        title = title[: MAX_TITLE_LENGTH - 1].rstrip() + "…"
+    return title
+
+
 def download_audio(
     url: str, dest_dir: Path, cookies_from_browser: str | None = None
 ) -> tuple[Path, str]:
@@ -53,7 +69,7 @@ def download_audio(
     audio_path = dest_dir / "audio.wav"
     if not audio_path.exists():
         raise RuntimeError("yt-dlp did not produce an audio file")
-    return audio_path, info.get("title") or "Untitled"
+    return audio_path, clean_title(info.get("title") or "Untitled")
 
 
 def transcribe(audio_path: Path, onset_threshold: float, frame_threshold: float) -> list[dict]:
