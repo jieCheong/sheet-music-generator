@@ -7,7 +7,23 @@ import { startWorker } from "./worker.js";
 const app = express();
 const PORT = process.env.PORT ?? 3010;
 
-app.use(cors({ origin: process.env.CLIENT_ORIGIN ?? "*" }));
+// Vite picks a different port whenever the client's usual one is already
+// taken by another local project, so any localhost origin is allowed in
+// addition to the configured CLIENT_ORIGIN (the real deployed frontend
+// domain in production) -- rather than hardcoding one dev port.
+const LOCALHOST_ORIGIN = /^http:\/\/localhost:\d+$/;
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || LOCALHOST_ORIGIN.test(origin) || origin === process.env.CLIENT_ORIGIN) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("Not allowed by CORS"));
+    },
+  }),
+);
 app.use(express.json());
 app.use(transcribeRouter);
 
