@@ -19,6 +19,9 @@ def download_audio(url: str, dest_dir: Path) -> Path:
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
         "quiet": True,
         "no_warnings": True,
+        # YouTube's "web" client increasingly 403s yt-dlp's format URLs; the
+        # android client uses a different endpoint that isn't affected.
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
