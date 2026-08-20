@@ -122,7 +122,12 @@ def find_suspected_outliers(notes: list[dict]) -> list[dict]:
     return flagged
 
 
-def build_score(quantized: stream.Stream, detected_key, tempo_bpm: float, title: str) -> stream.Score:
+def build_staff_pair(detected_key, tempo_bpm: float, title: str) -> tuple[stream.PartStaff, stream.PartStaff, layout.StaffGroup, stream.Score]:
+    """Piano grand-staff scaffolding (clefs, key/time signature, PartStaff+
+    StaffGroup brace, title/composer metadata) shared by both notation modes
+    -- this part has nothing to do with arrangement philosophy. Callers still
+    insert their own notes/chords and call makeMeasures/makeVoices themselves,
+    since that IS mode-specific."""
     # PartStaff (not Part) + StaffGroup gives a proper piano grand staff: one
     # "Piano" label and a connecting brace, instead of two separate parts
     # each showing their own label -- which, if left unset, music21's
@@ -140,6 +145,25 @@ def build_score(quantized: stream.Stream, detected_key, tempo_bpm: float, title:
     bass.insert(0, clef.BassClef())
     bass.insert(0, detected_key)
     bass.insert(0, meter.TimeSignature("4/4"))
+
+    staff_group = layout.StaffGroup([treble, bass], name="Piano", symbol="brace")
+
+    score = stream.Score()
+    score.metadata = metadata.Metadata()
+    score.metadata.title = title
+    # Both default to auto-filled values otherwise: movementName defaults to
+    # repeating the title as a subtitle, composer defaults to "Music21".
+    score.metadata.movementName = ""
+    score.metadata.composer = ""
+    score.insert(0, treble)
+    score.insert(0, bass)
+    score.insert(0, staff_group)
+
+    return treble, bass, staff_group, score
+
+
+def build_score(quantized: stream.Stream, detected_key, tempo_bpm: float, title: str) -> stream.Score:
+    treble, bass, staff_group, score = build_staff_pair(detected_key, tempo_bpm, title)
 
     # Group simultaneous notes into a single Chord instead of inserting each
     # as an independent Note at the same offset. Without this, basic-pitch's
@@ -172,18 +196,6 @@ def build_score(quantized: stream.Stream, detected_key, tempo_bpm: float, title:
         for m in target.getElementsByClass(stream.Measure):
             m.makeVoices(inPlace=True, fillGaps=True)
 
-    staff_group = layout.StaffGroup([treble, bass], name="Piano", symbol="brace")
-
-    score = stream.Score()
-    score.metadata = metadata.Metadata()
-    score.metadata.title = title
-    # Both default to auto-filled values otherwise: movementName defaults to
-    # repeating the title as a subtitle, composer defaults to "Music21".
-    score.metadata.movementName = ""
-    score.metadata.composer = ""
-    score.insert(0, treble)
-    score.insert(0, bass)
-    score.insert(0, staff_group)
     return score
 
 
@@ -247,6 +259,29 @@ def print_diagnostics(score: stream.Score, tempo_bpm: float, outliers: list[dict
     print("--- End diagnostics ---\n")
 
 
+def voice_stats(score: stream.Score) -> dict:
+    """Small subset of print_diagnostics' numbers, used to give church_sheet
+    mode a real (not fabricated) before/after comparison against transcription
+    mode on the same input."""
+    total_rests = 0
+    total_measures = 0
+    max_voices = 1
+    over_2_voices = 0
+    for part in score.parts:
+        for m in part.getElementsByClass(stream.Measure):
+            total_measures += 1
+            voices = list(m.voices) if m.voices else [m]
+            max_voices = max(max_voices, len(voices))
+            if len(voices) > 2:
+                over_2_voices += 1
+            total_rests += sum(1 for v in voices for el in v.notesAndRests if el.isRest)
+    return {
+        "max_voices": max_voices,
+        "avg_rests": total_rests / total_measures if total_measures else 0.0,
+        "over_2_voices": over_2_voices,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Turn basic-pitch note events into a notated Score.")
     parser.add_argument(
@@ -275,6 +310,15 @@ def main() -> None:
         default=16,
         help="Quantization grid as a note-value denominator, e.g. 16 for sixteenth notes (default: 16)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["transcription", "church_sheet"],
+        default="transcription",
+        help="transcription (default): preserve as much detected musical information as "
+        "reasonably possible. church_sheet: prioritize a clean, sight-readable arrangement "
+        "-- extracted melody, estimated harmony, and generated accompaniment, expected to "
+        "drop many detected notes. These are two separate algorithms, not a shared path.",
+    )
     args = parser.parse_args()
     if args.grid <= 0:
         parser.error("--grid must be a positive integer")
@@ -293,9 +337,22 @@ def main() -> None:
     detected_key = quantized.analyze("key")
     print(f"Detected key: {detected_key}")
 
-    score = build_score(quantized, detected_key, tempo_bpm, title)
+    transcription_score = build_score(quantized, detected_key, tempo_bpm, title)
 
-    print_diagnostics(score, tempo_bpm, outliers)
+    if args.mode == "church_sheet":
+        import church_sheet
+
+        score = church_sheet.run(
+            notes,
+            tempo_bpm,
+            title,
+            build_staff_pair,
+            transcription_comparison=voice_stats(transcription_score),
+            raw_outlier_count=len(outliers),
+        )
+    else:
+        score = transcription_score
+        print_diagnostics(score, tempo_bpm, outliers)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     score.write("musicxml", fp=str(args.output))

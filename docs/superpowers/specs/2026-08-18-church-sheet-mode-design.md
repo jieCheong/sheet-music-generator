@@ -1,4 +1,14 @@
-# Church sheet / easy piano mode (Stage A) — design
+# Church sheet / easy piano mode — design
+
+> **Update 2026-08-18:** the user provided a much more detailed follow-up
+> spec that explicitly requires chord/harmony estimation, generated LH
+> accompaniment patterns, and chord symbols in this same round rather than
+> deferred to a later "Stage B." The "Stage A only" scoping below is
+> superseded — this implementation covers melody extraction, chord region
+> detection, generated LH accompaniment, RH chord-tone stacking, rhythm
+> simplification, chord symbols, page-layout/engraving hints, and
+> readability diagnostics, all in one pass. Kept for historical record of
+> the original scoping reasoning.
 
 ## Overview
 
