@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { JobMode } from "./db.js";
 
 // server/src/pipeline.ts -> ../../ml (repo root/ml). Same relative depth
 // from dist/pipeline.js, and from /app/server/dist/pipeline.js in the
@@ -75,7 +76,11 @@ function runPythonScript(scriptPath: string, args: string[]): Promise<void> {
   });
 }
 
-export async function runPipeline(jobId: string, youtubeUrl: string): Promise<{ musicxmlPath: string }> {
+export async function runPipeline(
+  jobId: string,
+  youtubeUrl: string,
+  mode: JobMode,
+): Promise<{ musicxmlPath: string }> {
   const jobDir = path.join(ML_DIR, "output", jobId);
   const notesPath = path.join(jobDir, "notes.json");
   const musicxmlPath = path.join(jobDir, "score.musicxml");
@@ -90,7 +95,11 @@ export async function runPipeline(jobId: string, youtubeUrl: string): Promise<{ 
   }
 
   await runPythonScript(TRANSCRIBE_SCRIPT, transcribeArgs);
-  await runPythonScript(NOTATION_SCRIPT, ["--input", notesPath, "--output", musicxmlPath]);
+  // --mode only applies to notation.py: transcribe.py just extracts raw
+  // note events either way, arrangement philosophy is entirely notation.py's
+  // job (see ml/church_sheet.py -- a separate algorithm from transcription
+  // mode, not a shared path with a flag deep inside it).
+  await runPythonScript(NOTATION_SCRIPT, ["--input", notesPath, "--output", musicxmlPath, "--mode", mode]);
 
   return { musicxmlPath };
 }

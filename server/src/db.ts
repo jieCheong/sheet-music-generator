@@ -12,10 +12,13 @@ export const pool = new pg.Pool({
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
 
+export type JobMode = "transcription" | "church_sheet";
+
 export interface JobRow {
   id: string;
   youtube_url: string;
   instrument: string;
+  mode: JobMode;
   status: JobStatus;
   musicxml: string | null;
   error: string | null;
@@ -28,10 +31,10 @@ export async function createTableIfNotExists(): Promise<void> {
   await pool.query(schema);
 }
 
-export async function insertJob(id: string, youtubeUrl: string, instrument: string): Promise<void> {
+export async function insertJob(id: string, youtubeUrl: string, instrument: string, mode: JobMode): Promise<void> {
   await pool.query(
-    `INSERT INTO jobs (id, youtube_url, instrument, status) VALUES ($1, $2, $3, 'queued')`,
-    [id, youtubeUrl, instrument],
+    `INSERT INTO jobs (id, youtube_url, instrument, mode, status) VALUES ($1, $2, $3, $4, 'queued')`,
+    [id, youtubeUrl, instrument, mode],
   );
 }
 

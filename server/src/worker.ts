@@ -35,7 +35,7 @@ export function startWorker(): Worker<TranscribeJobData> {
       if (!id) throw new Error("job has no id");
 
       await markProcessing(id);
-      const { musicxmlPath } = await runPipeline(id, job.data.youtubeUrl);
+      const { musicxmlPath } = await runPipeline(id, job.data.youtubeUrl, job.data.mode);
       const musicxml = await readFile(musicxmlPath, "utf-8");
       await markCompletedWithRetry(id, musicxml);
     },

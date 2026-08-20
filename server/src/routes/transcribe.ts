@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { getJob, insertJob, markFailed } from "../db.js";
+import { getJob, insertJob, markFailed, type JobMode } from "../db.js";
 import { enqueueTranscribeJob } from "../queue.js";
 import { validateYoutubeUrl } from "../validation.js";
+
+const VALID_MODES: readonly JobMode[] = ["transcription", "church_sheet"];
 
 export const transcribeRouter = Router();
 
 transcribeRouter.post("/transcribe", async (req, res) => {
-  const body = req.body as { youtubeUrl?: unknown; instrument?: unknown };
+  const body = req.body as { youtubeUrl?: unknown; instrument?: unknown; mode?: unknown };
 
   if (typeof body.youtubeUrl !== "string" || !validateYoutubeUrl(body.youtubeUrl)) {
     res.status(400).json({ error: "youtubeUrl must be a valid YouTube video URL" });
@@ -17,12 +19,20 @@ transcribeRouter.post("/transcribe", async (req, res) => {
     res.status(400).json({ error: "instrument is required" });
     return;
   }
+  // Defaults to church_sheet (the easy/beginner-friendly arrangement) rather
+  // than transcription -- that's the mode the app is meant to hand new
+  // users by default; transcription is the opt-in, detailed alternative.
+  const mode: JobMode = body.mode === undefined ? "church_sheet" : (body.mode as JobMode);
+  if (!VALID_MODES.includes(mode)) {
+    res.status(400).json({ error: `mode must be one of: ${VALID_MODES.join(", ")}` });
+    return;
+  }
 
   const jobId = randomUUID();
-  await insertJob(jobId, body.youtubeUrl, body.instrument);
+  await insertJob(jobId, body.youtubeUrl, body.instrument, mode);
 
   try {
-    await enqueueTranscribeJob(jobId, { youtubeUrl: body.youtubeUrl, instrument: body.instrument });
+    await enqueueTranscribeJob(jobId, { youtubeUrl: body.youtubeUrl, instrument: body.instrument, mode });
   } catch (err) {
     // Redis was unreachable/slow: don't leave the row stuck at "queued"
     // forever with no worker ever going to see it.
@@ -46,6 +56,7 @@ transcribeRouter.get("/transcribe/:jobId/status", async (req, res) => {
     status: job.status,
     youtubeUrl: job.youtube_url,
     instrument: job.instrument,
+    mode: job.mode,
     createdAt: job.created_at.toISOString(),
     updatedAt: job.updated_at.toISOString(),
     ...(job.musicxml !== null ? { musicxml: job.musicxml } : {}),

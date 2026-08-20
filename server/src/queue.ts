@@ -1,11 +1,13 @@
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
+import type { JobMode } from "./db.js";
 
 export const QUEUE_NAME = "transcribe";
 
 export interface TranscribeJobData {
   youtubeUrl: string;
   instrument: string;
+  mode: JobMode;
 }
 
 // BullMQ requires maxRetriesPerRequest: null on any connection it drives
