@@ -18,7 +18,7 @@ Pipeline (see docs/superpowers/specs/2026-08-18-church-sheet-mode-design.md):
 import math
 from collections import defaultdict
 
-from music21 import chord as m21chord, harmony, key as m21key, layout, note as m21note, stream
+from music21 import chord as m21chord, harmony, key as m21key, layout, note as m21note, pitch as m21pitch, stream
 
 # ---- Melody extraction (DP / Viterbi-style path selection) ----
 
@@ -257,9 +257,17 @@ COMPLEXITY_PENALTY = 0.04  # don't chase 7th-chord extensions unless clearly a b
 WEAK_ROOT_PENALTY = 0.15
 BASS_MATCH_BONUS = 0.06
 LOW_PITCH_CUTOFF = 60  # notes below middle C count toward the bass pitch-class cross-check
+STABILITY_BONUS = 0.06  # small reward for repeating the previous slot's chord -- without
+# this, a slot whose evidence is genuinely close between two candidates (e.g.
+# one or two passing melody notes tipping the balance) flips the label back
+# and forth even though the surrounding harmony hasn't actually changed.
+# Only a candidate that clearly outscores the previous chord (by more than
+# this margin) is allowed to replace it.
 
 
-def _score_chord(weight: list[float], total: float, low_root_guess: int | None) -> tuple[int, str]:
+def _score_chord(
+    weight: list[float], total: float, low_root_guess: int | None, previous: tuple[int, str] | None = None
+) -> tuple[int, str]:
     best, best_score = None, -math.inf
     for root in range(12):
         for quality, intervals in CHORD_QUALITIES.items():
@@ -270,6 +278,8 @@ def _score_chord(weight: list[float], total: float, low_root_guess: int | None) 
                 score -= WEAK_ROOT_PENALTY
             if low_root_guess is not None and root == low_root_guess:
                 score += BASS_MATCH_BONUS
+            if previous is not None and (root, quality) == previous:
+                score += STABILITY_BONUS
             if score > best_score:
                 best_score, best = score, (root, quality)
     return best
@@ -278,6 +288,7 @@ def _score_chord(weight: list[float], total: float, low_root_guess: int | None) 
 def _detect_raw_regions(events: list[dict], song_end: float) -> list[tuple[int, str] | None]:
     regions = []
     t = 0.0
+    previous: tuple[int, str] | None = None
     while t < song_end:
         end = min(t + CHORD_REGION_BEATS, song_end)
         weight = [0.0] * 12
@@ -296,7 +307,9 @@ def _detect_raw_regions(events: list[dict], song_end: float) -> list[tuple[int, 
             regions.append(None)
         else:
             low_root_guess = low_weight.index(max(low_weight)) if sum(low_weight) > 0 else None
-            regions.append(_score_chord(weight, total, low_root_guess))
+            chosen = _score_chord(weight, total, low_root_guess, previous)
+            regions.append(chosen)
+            previous = chosen
         t = end
     return regions
 
@@ -352,26 +365,87 @@ MAJOR_SCALE_INTERVALS = (0, 2, 4, 5, 7, 9, 11)
 MAJOR_TONIC_SHARPS = {0: 0, 7: 1, 2: 2, 9: 3, 4: 4, 11: 5, 6: 6, 1: -5, 8: -4, 3: -3, 10: -2, 5: -1}
 
 
-def infer_key_signature(regions: list[dict]) -> m21key.KeySignature:
-    """Estimates the key from the detected chord regions' roots (weighted by
-    duration), rather than trusting a generic pitch-histogram key-profile
-    analysis of the raw notes (music21's `Stream.analyze('key')`, what
-    transcription mode uses). That analysis can misfire on real
-    audio-derived note data -- on one real song it returned "g minor" while
-    the actual detected chord progression (D, A, Bm, Dmaj7, E7, Gmaj7,
-    F#m, B7...) is almost entirely diatonic to D major. Spelling chord
-    symbols from the wrong key produced needlessly wrong-looking
-    accidentals (F#m spelled as Gbm) -- this is church_sheet mode's own key
-    estimate, independent of transcription mode's."""
+# A single global key is wrong whenever a song actually modulates: on real
+# audio (a song that opens in D major for ~20 measures, moves to a clearly
+# distinct Eb/Bb-centered section for the bulk of its length, then returns
+# near the end), forcing one key signature for the whole piece makes the
+# *majority* choice look right and the D-major opening constantly
+# accidental-laden -- exactly backwards from what a reader needs. This
+# treats key assignment as a DP/Viterbi segmentation over the chord
+# regions (same style as the melody extractor): each region has a per-tonic
+# misfit cost (its duration, if the chord root isn't diatonic to that
+# tonic's major scale), and switching tonics costs a flat penalty -- so a
+# brief passing/ambiguous chord isn't worth a key change, but a genuine,
+# sustained shift in tonal center is.
+KEY_CHANGE_PENALTY = 16.0  # in "beats of misfit" -- roughly 4 measures' worth
+
+
+def infer_key_segments(regions: list[dict]) -> list[dict]:
+    """Returns [{start, end, sharps}, ...] covering the whole region range.
+    Chord symbols and note spelling both use whichever segment covers their
+    own moment, instead of one global choice (see infer_key_signature,
+    church_sheet mode's now-superseded first attempt at this, which
+    misspelled an entire D-major section because a longer Eb/Bb-centered
+    section elsewhere in the same song outweighed it in a single global
+    average)."""
     if not regions:
-        return m21key.KeySignature(0)
-    best_tonic, best_score = 0, -1.0
-    for tonic in range(12):
-        scale = {(tonic + iv) % 12 for iv in MAJOR_SCALE_INTERVALS}
-        score = sum(r["end"] - r["start"] for r in regions if r["root_pc"] in scale)
-        if score > best_score:
-            best_score, best_tonic = score, tonic
-    return m21key.KeySignature(MAJOR_TONIC_SHARPS[best_tonic])
+        return [{"start": 0.0, "end": 0.0, "sharps": 0}]
+
+    tonics = list(range(12))
+    scales = [{(t + iv) % 12 for iv in MAJOR_SCALE_INTERVALS} for t in tonics]
+
+    # dp[t] = (accumulated cost choosing tonic t through this region, backpointer)
+    dp: list[dict[int, tuple[float, int | None]]] = [dict() for _ in regions]
+    first = regions[0]
+    first_dur = first["end"] - first["start"]
+    for t in tonics:
+        misfit = 0.0 if first["root_pc"] in scales[t] else first_dur
+        dp[0][t] = (misfit, None)
+
+    for i in range(1, len(regions)):
+        r = regions[i]
+        dur = r["end"] - r["start"]
+        prev_layer = dp[i - 1]
+        for t in tonics:
+            misfit = 0.0 if r["root_pc"] in scales[t] else dur
+            best_cost, best_prev = math.inf, None
+            for pt, (pcost, _) in prev_layer.items():
+                total = pcost + (0.0 if pt == t else KEY_CHANGE_PENALTY)
+                if total < best_cost:
+                    best_cost, best_prev = total, pt
+            dp[i][t] = (best_cost + misfit, best_prev)
+
+    end_tonic = min(dp[-1], key=lambda t: dp[-1][t][0])
+    path = [0] * len(regions)
+    path[-1] = end_tonic
+    for i in range(len(regions) - 1, 0, -1):
+        path[i - 1] = dp[i][path[i]][1]
+
+    segments = []
+    i = 0
+    while i < len(path):
+        j = i
+        while j + 1 < len(path) and path[j + 1] == path[i]:
+            j += 1
+        segments.append({"start": regions[i]["start"], "end": regions[j]["end"], "sharps": MAJOR_TONIC_SHARPS[path[i]]})
+        i = j + 1
+
+    # Key-signature changes belong at barlines, not mid-measure -- round each
+    # interior boundary to the nearest measure. The first segment keeps its
+    # real start (roughly 0, wherever the first chord was detected) and the
+    # last keeps its real end (the song's actual end).
+    for k in range(1, len(segments)):
+        boundary = round(segments[k]["start"] / MEASURE_BEATS) * MEASURE_BEATS
+        segments[k]["start"] = boundary
+        segments[k - 1]["end"] = boundary
+    return segments
+
+
+def _find_key_segment(segments: list[dict], t: float) -> dict:
+    for seg in segments:
+        if seg["start"] <= t < seg["end"]:
+            return seg
+    return segments[-1]
 
 
 PITCH_CLASS_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -447,13 +521,22 @@ HARMONIZE_MIN_DURATION_BEATS = 2.0  # only stack chord tones under held/strong m
 # optional chord tones." 2.0 keeps harmony at phrase/cadence points instead.
 MAX_RH_CHORD_TONES = 2  # + the melody note itself = 3, matching "normally 3 notes" guidance
 LOWEST_USABLE_PITCH = 21  # A0
+HARMONIZE_MIN_PITCH = 55  # G3 -- don't stack chord tones under a melody note that's
+# already low. Chord tones are picked from up to an octave *below* the
+# melody note, so harmonizing an already-marginal-register melody note (one
+# that only barely cleared the DP's plausible-register floor) pushes the
+# added notes into genuinely bass-clef territory -- a real case on real
+# audio: a D3 melody note got Bb2/D2 stacked under it, a 3-note cluster
+# sitting almost entirely below the bass staff's middle line, rendered in
+# the treble clef with a wall of ledger lines. Below this floor, the melody
+# note stays a single note instead of compounding into a cluster.
 
 
 def build_rh_events(melody: list[dict], regions: list[dict]) -> list[dict]:
     events = []
     for mn in melody:
         pitches = [mn["pitch"]]
-        if mn["end"] - mn["start"] >= HARMONIZE_MIN_DURATION_BEATS:
+        if mn["end"] - mn["start"] >= HARMONIZE_MIN_DURATION_BEATS and mn["pitch"] >= HARMONIZE_MIN_PITCH:
             region = _find_region(regions, mn["start"])
             if region:
                 chord_pcs = [(region["root_pc"] + iv) % 12 for iv in CHORD_QUALITIES[region["quality"]]]
@@ -533,15 +616,23 @@ MEASURES_PER_SYSTEM_DENSE = 3
 MEASURES_PER_SYSTEM_NORMAL = 4
 
 
-def _insert_events(target: stream.PartStaff, events: list[dict]) -> None:
+def _spell_pitch(midi: int, use_flats: bool) -> m21pitch.Pitch:
+    name = PITCH_CLASS_FLAT[midi % 12] if use_flats else PITCH_CLASS_SHARP[midi % 12]
+    return m21pitch.Pitch(f"{name}{midi // 12 - 1}")
+
+
+def _insert_events(target: stream.PartStaff, events: list[dict], key_segments: list[dict]) -> None:
     for e in events:
         length = e["end"] - e["start"]
         if length <= 0:
             continue
-        pitches = e["pitches"]
-        element = (
-            m21chord.Chord(pitches, quarterLength=length) if len(pitches) > 1 else m21note.Note(pitches[0], quarterLength=length)
-        )
+        # Spell each pitch from whichever key segment covers its own onset --
+        # a note doesn't inherit music21's arbitrary default spelling for a
+        # bare MIDI number, it's built with the accidental (sharp or flat)
+        # that actually matches the local harmonic context.
+        use_flats = _find_key_segment(key_segments, e["start"])["sharps"] < 0
+        spelled = [_spell_pitch(p, use_flats) for p in e["pitches"]]
+        element = m21chord.Chord(spelled, quarterLength=length) if len(spelled) > 1 else m21note.Note(spelled[0], quarterLength=length)
         target.insert(e["start"], element)
 
 
@@ -549,7 +640,7 @@ def build_church_score(
     rh_events: list[dict],
     lh_events: list[dict],
     regions: list[dict],
-    key_signature: m21key.KeySignature,
+    key_segments: list[dict],
     tempo_bpm: float,
     title: str,
     build_staff_pair,
@@ -557,10 +648,20 @@ def build_church_score(
     """build_staff_pair is notation.py's staff/metadata scaffolding, reused because
     it has nothing to do with arrangement philosophy (clefs, key/time signature,
     PartStaff+StaffGroup piano-brace setup, title/composer metadata)."""
-    treble, bass, staff_group, score = build_staff_pair(key_signature, tempo_bpm, title)
+    initial_key = m21key.KeySignature(key_segments[0]["sharps"])
+    treble, bass, staff_group, score = build_staff_pair(initial_key, tempo_bpm, title)
 
-    _insert_events(treble, rh_events)
-    _insert_events(bass, lh_events)
+    # A real, sustained modulation (confirmed by infer_key_segments' DP
+    # against a change penalty, not a single ambiguous chord) gets an actual
+    # key-signature change at the boundary -- standard engraving practice --
+    # instead of accidentals piled onto one key signature for whichever
+    # section happened to be longer.
+    for seg in key_segments[1:]:
+        for target in (treble, bass):
+            target.insert(seg["start"], m21key.KeySignature(seg["sharps"]))
+
+    _insert_events(treble, rh_events, key_segments)
+    _insert_events(bass, lh_events, key_segments)
 
     # RH and LH don't necessarily end at the same offset -- a final LH chord
     # can ring on after the last melody note (a real "outro chord" case, not
@@ -590,9 +691,9 @@ def build_church_score(
     # it into the flat stream beforehand gets it swept up by every later
     # notes/chords scan (voice counting, density, readability diagnostics) as if
     # it were a notated chord in the music.
-    use_flats = key_signature.sharps < 0
     treble_measures = list(treble.getElementsByClass(stream.Measure))
     for region in regions:
+        use_flats = _find_key_segment(key_segments, region["start"])["sharps"] < 0
         cs = harmony.ChordSymbol(chord_symbol_text(region["root_pc"], region["quality"], use_flats))
         cs.writeAsChord = False
         target_measure = next((m for m in treble_measures if m.offset <= region["start"] < m.offset + m.barDuration.quarterLength), None)
@@ -735,7 +836,7 @@ def print_church_mode_report(
     bass: stream.PartStaff,
     regions: list[dict],
     pattern: str,
-    use_flats: bool,
+    key_segments: list[dict],
     trace: dict,
     transcription_comparison: dict | None,
     raw_outlier_count: int,
@@ -779,8 +880,15 @@ def print_church_mode_report(
     print(f"  before (transcription mode outlier flags): {raw_outlier_count}")
     print(f"  after (church mode, outside {LOW_READING_RANGE}-{HIGH_READING_RANGE} MIDI): {out_of_range_after}")
 
+    print(f"\nDetected key segments: {len(key_segments)}")
+    for seg in key_segments:
+        print(f"  beat {seg['start']:.1f}-{seg['end']:.1f}: {abs(seg['sharps'])} {'flats' if seg['sharps'] < 0 else 'sharps'}")
+
     print(f"\nDetected chord regions: {len(regions)}")
-    print("  " + " | ".join(chord_symbol_text(r["root_pc"], r["quality"], use_flats) for r in regions[:24]) + (" ..." if len(regions) > 24 else ""))
+    preview = [
+        chord_symbol_text(r["root_pc"], r["quality"], _find_key_segment(key_segments, r["start"])["sharps"] < 0) for r in regions[:24]
+    ]
+    print("  " + " | ".join(preview) + (" ..." if len(regions) > 24 else ""))
     print(f"\nAccompaniment pattern: {pattern}")
 
     warnings = []
@@ -835,9 +943,11 @@ def run(
     regions = detect_chord_regions(notes, tempo_bpm)
     # church_sheet mode's own key estimate, derived from the chord regions --
     # not transcription mode's Stream.analyze('key') on the raw notes (see
-    # infer_key_signature's docstring for why that can disagree with the
-    # actual detected harmony).
-    key_signature = infer_key_signature(regions)
+    # infer_key_segments' docstring for why that can disagree with the
+    # actual detected harmony). Segmented, not a single global key: a real
+    # modulation gets its own key signature instead of forcing accidentals
+    # on whichever section didn't dominate by duration.
+    key_segments = infer_key_segments(regions)
     pattern = pick_lh_pattern(notes, tempo_bpm, regions)
 
     rh_events = build_rh_events(melody, regions)
@@ -846,7 +956,7 @@ def run(
     trace["lh_events"] = len(lh_events)
     trace["arranger_out"] = len(rh_events) + len(lh_events)
 
-    score = build_church_score(rh_events, lh_events, regions, key_signature, tempo_bpm, title, build_staff_pair)
+    score = build_church_score(rh_events, lh_events, regions, key_segments, tempo_bpm, title, build_staff_pair)
     treble = next(p for p in score.parts if p.id == "treble")
     bass = next(p for p in score.parts if p.id == "bass")
 
@@ -865,14 +975,13 @@ def run(
 
     trace["exported_notes"] = _logical_note_count(treble) + _logical_note_count(bass)
 
-    use_flats = key_signature.sharps < 0
     print_church_mode_report(
         score,
         treble,
         bass,
         regions,
         pattern,
-        use_flats,
+        key_segments,
         trace,
         transcription_comparison,
         raw_outlier_count,
