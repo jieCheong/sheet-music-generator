@@ -1,12 +1,14 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3010";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
+export type JobMode = "transcription" | "church_sheet";
 
 export interface JobStatusResponse {
   jobId: string;
   status: JobStatus;
   youtubeUrl: string;
   instrument: string;
+  mode: JobMode;
   createdAt: string;
   updatedAt: string;
   musicxml?: string;
@@ -26,11 +28,12 @@ async function parseErrorMessage(response: Response): Promise<string> {
 export async function submitTranscription(
   youtubeUrl: string,
   instrument: string,
+  mode: JobMode,
 ): Promise<{ jobId: string }> {
   const response = await fetch(`${API_BASE}/transcribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ youtubeUrl, instrument }),
+    body: JSON.stringify({ youtubeUrl, instrument, mode }),
   });
 
   if (!response.ok) {

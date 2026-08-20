@@ -3,7 +3,7 @@ import "svg2pdf.js";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import "./App.css";
-import { getJobStatus, submitTranscription, type JobStatus } from "./api";
+import { getJobStatus, submitTranscription, type JobMode, type JobStatus } from "./api";
 
 const INSTRUMENT = "piano";
 const POLL_INTERVAL_MS = 2000;
@@ -32,6 +32,7 @@ function errorMessage(err: unknown): string {
 
 function App() {
   const [url, setUrl] = useState("");
+  const [mode, setMode] = useState<JobMode>("church_sheet");
   const [state, setState] = useState<AppState>({ phase: "idle" });
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   // scaleWrapperRef: the visible, responsive box (width scales with the page).
@@ -140,7 +141,7 @@ function App() {
 
     setState({ phase: "submitting" });
     try {
-      const { jobId } = await submitTranscription(trimmed, INSTRUMENT);
+      const { jobId } = await submitTranscription(trimmed, INSTRUMENT, mode);
       setState({ phase: "polling", jobId, status: "queued" });
     } catch (err) {
       setState({ phase: "failed", error: errorMessage(err) });
@@ -176,10 +177,68 @@ function App() {
 
   return (
     <main className="page">
-      <h1>YouTube to Sheet Music</h1>
+      <header className="app-header">
+        <div className="brand">
+          <span className="brand-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+              <circle cx="6" cy="18" r="2.6" fill="currentColor" />
+              <circle cx="16" cy="16" r="2.6" fill="currentColor" />
+              <path
+                d="M8.6 18V6.5L18.6 4.5V14.5"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <h1>Sheet Music</h1>
+        </div>
+        <p className="tagline">YouTube &rarr; Piano Score, Entirely Offline</p>
+      </header>
+
+      <section className="mode-section">
+        <h2 className="section-label">Output Mode</h2>
+        <div className="mode-toggle" role="radiogroup" aria-label="Arrangement style">
+          <label className={mode === "church_sheet" ? "selected" : undefined}>
+            <input
+              type="radio"
+              name="mode"
+              value="church_sheet"
+              checked={mode === "church_sheet"}
+              onChange={() => setMode("church_sheet")}
+              disabled={busy}
+            />
+            <span className="mode-icon" aria-hidden="true">
+              &#9834;
+            </span>
+            <span className="mode-title">Easy Piano</span>
+            <span className="mode-desc">Melody + generated left-hand accompaniment, beginner-readable</span>
+          </label>
+          <label className={mode === "transcription" ? "selected" : undefined}>
+            <input
+              type="radio"
+              name="mode"
+              value="transcription"
+              checked={mode === "transcription"}
+              onChange={() => setMode("transcription")}
+              disabled={busy}
+            />
+            <span className="mode-icon" aria-hidden="true">
+              &#9835;
+            </span>
+            <span className="mode-title">Full Transcription</span>
+            <span className="mode-desc">Every detected note, closest to the original recording</span>
+          </label>
+        </div>
+      </section>
 
       <form className="url-form" onSubmit={handleSubmit}>
+        <label className="field-label" htmlFor="youtube-url">
+          YouTube URL
+        </label>
         <input
+          id="youtube-url"
           type="url"
           placeholder="https://www.youtube.com/watch?v=..."
           value={url}
@@ -217,6 +276,8 @@ function App() {
       <div ref={scaleWrapperRef} className="score-container" hidden={state.phase !== "completed"}>
         <div ref={renderTargetRef} className="score-render-target" style={{ width: OSMD_RENDER_WIDTH }} />
       </div>
+
+      <footer className="app-footer">yt-dlp &middot; basic-pitch &middot; music21 &middot; OpenSheetMusicDisplay</footer>
     </main>
   );
 }
