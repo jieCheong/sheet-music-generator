@@ -233,12 +233,58 @@ def _segment_path(path: list[int | None], slice_len: float) -> list[dict]:
     return cleaned
 
 
+ROUND_TRIP_OUT_THRESHOLD = 9  # semitones a run must clear from BOTH neighborhoods to be suspect
+ROUND_TRIP_RETURN_THRESHOLD = 12  # semitones the neighborhoods may differ from EACH OTHER and still count as "the same register"
+ROUND_TRIP_CONTEXT_RUNS = 2  # how many runs on each side make up the "neighborhood" average
+
+
+def _remove_register_round_trips(runs: list[dict]) -> list[dict]:
+    """Drops a run that sits far away from the surrounding register on both
+    sides, when that surrounding register is itself consistent before and
+    after -- a genuine wide melodic leap doesn't immediately reverse itself,
+    so a "down and straight back up" (or up-and-back-down) shape is a strong
+    signal of an octave/register detection error, not a deliberate leap.
+    Confirmed on real audio: a loud, sustained low note (velocity 90+)
+    landing between two clearly higher, continuous melodic phrases -- loud
+    enough to briefly win the melody DP despite being the wrong register.
+
+    Compares against a small window of neighboring runs (their average),
+    not just the single immediate neighbor on each side: a strict
+    one-hop-only check missed a real case where the "return" wasn't the
+    very next run (the low run was itself immediately followed by a second,
+    less-wrong-but-still-lowish run before the register genuinely came
+    back) -- averaging over a short window still recognizes that as one
+    sunken passage. This is a wider net than _segment_path's isolated-run
+    check above, which only catches very short (<=FLOURISH_BEATS) blips;
+    this one catches sustained wrong-register notes too, as long as the
+    surrounding context clearly returns to where it was."""
+    if len(runs) < 3:
+        return runs
+    keep = [True] * len(runs)
+    for i in range(len(runs)):
+        before = [runs[k]["pitch"] for k in range(max(0, i - ROUND_TRIP_CONTEXT_RUNS), i) if keep[k]]
+        after = [runs[k]["pitch"] for k in range(i + 1, min(len(runs), i + 1 + ROUND_TRIP_CONTEXT_RUNS))]
+        if not before or not after:
+            continue
+        before_avg = sum(before) / len(before)
+        after_avg = sum(after) / len(after)
+        cur_p = runs[i]["pitch"]
+        if (
+            abs(cur_p - before_avg) > ROUND_TRIP_OUT_THRESHOLD
+            and abs(cur_p - after_avg) > ROUND_TRIP_OUT_THRESHOLD
+            and abs(before_avg - after_avg) <= ROUND_TRIP_RETURN_THRESHOLD
+        ):
+            keep[i] = False
+    return [r for r, k in zip(runs, keep) if k]
+
+
 def extract_melody(notes: list[dict], tempo_bpm: float, grid: int = MELODY_GRID) -> list[dict]:
     events = _to_beats(notes, tempo_bpm)
     slices, slice_len, num_slices = _slice_song(events, grid)
     register_avg = _local_register(events, num_slices, slice_len)
     path = _extract_melody_path(slices, register_avg)
-    return _segment_path(path, slice_len)
+    runs = _segment_path(path, slice_len)
+    return _remove_register_round_trips(runs)
 
 
 # ---- Chord region detection (template matching) ----
@@ -257,38 +303,40 @@ COMPLEXITY_PENALTY = 0.04  # don't chase 7th-chord extensions unless clearly a b
 WEAK_ROOT_PENALTY = 0.15
 BASS_MATCH_BONUS = 0.06
 LOW_PITCH_CUTOFF = 60  # notes below middle C count toward the bass pitch-class cross-check
-STABILITY_BONUS = 0.06  # small reward for repeating the previous slot's chord -- without
-# this, a slot whose evidence is genuinely close between two candidates (e.g.
-# one or two passing melody notes tipping the balance) flips the label back
-# and forth even though the surrounding harmony hasn't actually changed.
-# Only a candidate that clearly outscores the previous chord (by more than
-# this margin) is allowed to replace it.
+CHORD_CHANGE_PENALTY = 0.06  # DP transition cost for switching chords between adjacent
+# slots -- without this, a slot whose evidence is genuinely close between
+# two candidates (e.g. one or two passing melody notes tipping the balance)
+# flips the label back and forth even though the surrounding harmony hasn't
+# actually changed. A candidate must outscore the current chord by more
+# than this margin to be worth switching to -- exactly the same
+# "duration-aware" smoothing as infer_key_segments' DP, just one level down
+# (chord identity within a segment, not which segment). Calibrated against
+# real data, not guessed: single-slot top-two score gaps on a real song
+# were mostly under 0.1 (median 0.005, p90 0.123) -- an earlier attempt at
+# 0.5 was nowhere near that scale and made the chord almost never change at
+# all (regions collapsed 107 -> 40 and corrupted the downstream key
+# detection). 0.06 sits within the real gap distribution: enough to resist
+# single-slot noise, not enough to freeze out a genuine change.
+CHORD_STATES = [(root, quality) for root in range(12) for quality in CHORD_QUALITIES]
 
 
-def _score_chord(
-    weight: list[float], total: float, low_root_guess: int | None, previous: tuple[int, str] | None = None
-) -> tuple[int, str]:
-    best, best_score = None, -math.inf
-    for root in range(12):
-        for quality, intervals in CHORD_QUALITIES.items():
-            pcs = [(root + iv) % 12 for iv in intervals]
-            score = sum(weight[pc] for pc in pcs) / total
-            score -= COMPLEXITY_PENALTY * CHORD_QUALITY_COMPLEXITY[quality]
-            if weight[root] / total < 0.05:
-                score -= WEAK_ROOT_PENALTY
-            if low_root_guess is not None and root == low_root_guess:
-                score += BASS_MATCH_BONUS
-            if previous is not None and (root, quality) == previous:
-                score += STABILITY_BONUS
-            if score > best_score:
-                best_score, best = score, (root, quality)
-    return best
+def _chord_scores(weight: list[float], total: float, low_root_guess: int | None) -> dict[tuple[int, str], float]:
+    scores = {}
+    for root, quality in CHORD_STATES:
+        pcs = [(root + iv) % 12 for iv in CHORD_QUALITIES[quality]]
+        score = sum(weight[pc] for pc in pcs) / total
+        score -= COMPLEXITY_PENALTY * CHORD_QUALITY_COMPLEXITY[quality]
+        if weight[root] / total < 0.05:
+            score -= WEAK_ROOT_PENALTY
+        if low_root_guess is not None and root == low_root_guess:
+            score += BASS_MATCH_BONUS
+        scores[(root, quality)] = score
+    return scores
 
 
 def _detect_raw_regions(events: list[dict], song_end: float) -> list[tuple[int, str] | None]:
-    regions = []
+    slot_scores: list[dict[tuple[int, str], float] | None] = []
     t = 0.0
-    previous: tuple[int, str] | None = None
     while t < song_end:
         end = min(t + CHORD_REGION_BEATS, song_end)
         weight = [0.0] * 12
@@ -304,14 +352,48 @@ def _detect_raw_regions(events: list[dict], song_end: float) -> list[tuple[int, 
                 low_weight[pc] += w
         total = sum(weight)
         if total <= 1e-6:
-            regions.append(None)
+            slot_scores.append(None)
         else:
             low_root_guess = low_weight.index(max(low_weight)) if sum(low_weight) > 0 else None
-            chosen = _score_chord(weight, total, low_root_guess, previous)
-            regions.append(chosen)
-            previous = chosen
+            slot_scores.append(_chord_scores(weight, total, low_root_guess))
         t = end
-    return regions
+
+    # DP within each maximal run of non-silent slots (silence is a hard
+    # break -- the later merge step in detect_chord_regions already carries
+    # the previous chord forward through brief silence, so the DP doesn't
+    # need to reach across it).
+    result: list[tuple[int, str] | None] = [None] * len(slot_scores)
+    i = 0
+    while i < len(slot_scores):
+        if slot_scores[i] is None:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(slot_scores) and slot_scores[j + 1] is not None:
+            j += 1
+
+        run_len = j - i + 1
+        dp: list[dict[tuple[int, str], tuple[float, tuple[int, str] | None]]] = [dict() for _ in range(run_len)]
+        for s in CHORD_STATES:
+            dp[0][s] = (-slot_scores[i][s], None)
+        for k in range(1, run_len):
+            cur_scores = slot_scores[i + k]
+            prev_layer = dp[k - 1]
+            for s in CHORD_STATES:
+                best_cost, best_prev = math.inf, None
+                for ps, (pcost, _) in prev_layer.items():
+                    total_cost = pcost + (0.0 if ps == s else CHORD_CHANGE_PENALTY)
+                    if total_cost < best_cost:
+                        best_cost, best_prev = total_cost, ps
+                dp[k][s] = (best_cost - cur_scores[s], best_prev)
+
+        end_state = min(dp[-1], key=lambda s: dp[-1][s][0])
+        path: list[tuple[int, str]] = [end_state] * run_len
+        for k in range(run_len - 1, 0, -1):
+            path[k - 1] = dp[k][path[k]][1]
+        result[i : j + 1] = path
+        i = j + 1
+    return result
 
 
 def _choose_bass_octave(root_pc: int, target_midi: int = 45) -> int:
@@ -520,7 +602,6 @@ HARMONIZE_MIN_DURATION_BEATS = 2.0  # only stack chord tones under held/strong m
 # producing a chord under almost everything instead of "primarily melody plus
 # optional chord tones." 2.0 keeps harmony at phrase/cadence points instead.
 MAX_RH_CHORD_TONES = 2  # + the melody note itself = 3, matching "normally 3 notes" guidance
-LOWEST_USABLE_PITCH = 21  # A0
 HARMONIZE_MIN_PITCH = 55  # G3 -- don't stack chord tones under a melody note that's
 # already low. Chord tones are picked from up to an octave *below* the
 # melody note, so harmonizing an already-marginal-register melody note (one
@@ -530,6 +611,14 @@ HARMONIZE_MIN_PITCH = 55  # G3 -- don't stack chord tones under a melody note th
 # sitting almost entirely below the bass staff's middle line, rendered in
 # the treble clef with a wall of ledger lines. Below this floor, the melody
 # note stays a single note instead of compounding into a cluster.
+UNDER_NOTE_MIN_PITCH = 55  # G3 -- separately, an added chord tone itself must not dip
+# below this even when the melody note above it clears HARMONIZE_MIN_PITCH.
+# A chord tone up to an octave below a merely-adequate melody note can still
+# land in ledger-line territory (real case: C#4 melody, an F#3 chord tone
+# added below it -- individually both look reasonable, but stacked together
+# they read as a dense low cluster). Dropping the offending tone instead of
+# the whole chord keeps a compact 2-note chord where a 3-note one would
+# have sat too low.
 
 
 def build_rh_events(melody: list[dict], regions: list[dict]) -> list[dict]:
@@ -548,7 +637,7 @@ def build_rh_events(melody: list[dict], regions: list[dict]) -> list[dict]:
                     p = mn["pitch"] - ((mn["pitch"] - pc) % 12)
                     if p > mn["pitch"]:
                         p -= 12
-                    if mn["pitch"] - p <= 12 and p >= LOWEST_USABLE_PITCH:
+                    if mn["pitch"] - p <= 12 and p >= UNDER_NOTE_MIN_PITCH:
                         candidates.append(p)
                 under_notes = sorted(set(candidates), reverse=True)[:MAX_RH_CHORD_TONES]
                 pitches = sorted(under_notes + [mn["pitch"]])
@@ -819,6 +908,47 @@ def _empty_lh_despite_chord(bass: stream.PartStaff, regions: list[dict]) -> list
     return flagged
 
 
+MELODY_GAP_MIN_MEASURES = 3  # only flag genuinely long gaps -- normal phrasing has
+# single-measure rests all the time, those aren't worth flagging for review.
+
+
+def _consecutive_empty_rh_ranges(treble: stream.PartStaff, tempo_bpm: float) -> list[dict]:
+    """Measure ranges where RH has no real melody content at all, for at
+    least MELODY_GAP_MIN_MEASURES in a row. Deliberately diagnostic-only --
+    church_sheet mode doesn't invent melody to fill these in. A long gap can
+    be entirely correct (a genuine instrumental/vocal rest in the source),
+    or it can mean the melody extractor dropped real content; only
+    cross-referencing against the source audio can tell the difference, so
+    this just reports measure numbers and timestamps for that check."""
+    measures = list(treble.getElementsByClass(stream.Measure))
+
+    def has_note(m: stream.Measure) -> bool:
+        return any(not el.isRest for el in m.recurse().notesAndRests if not isinstance(el, harmony.Harmony))
+
+    gaps = []
+    i = 0
+    while i < len(measures):
+        if has_note(measures[i]):
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(measures) and not has_note(measures[j + 1]):
+            j += 1
+        if j - i + 1 >= MELODY_GAP_MIN_MEASURES:
+            start_beat = measures[i].offset
+            end_beat = measures[j].offset + measures[j].barDuration.quarterLength
+            gaps.append(
+                {
+                    "start_measure": measures[i].number,
+                    "end_measure": measures[j].number,
+                    "start_seconds": start_beat * 60.0 / tempo_bpm,
+                    "end_seconds": end_beat * 60.0 / tempo_bpm,
+                }
+            )
+        i = j + 1
+    return gaps
+
+
 def _count_out_of_range(part: stream.PartStaff) -> int:
     count = 0
     for el in part.recurse().notes:
@@ -840,6 +970,7 @@ def print_church_mode_report(
     trace: dict,
     transcription_comparison: dict | None,
     raw_outlier_count: int,
+    tempo_bpm: float,
 ) -> None:
     raw_count = trace["raw_notes"]
     exported_count = trace["exported_notes"]
@@ -876,6 +1007,15 @@ def print_church_mode_report(
     print(f"Measures with >2 voices (LH): {bass_stats['over_2_voices']}")
     print(f"Measures with empty LH despite valid chord: {len(empty_lh)}")
 
+    melody_gaps = _consecutive_empty_rh_ranges(treble, tempo_bpm)
+    print(f"\nConsecutive measures without RH melody (>= {MELODY_GAP_MIN_MEASURES}): {len(melody_gaps)}")
+    print("  (diagnostic only -- church mode does not invent melody to fill these; check against the source audio)")
+    for gap in melody_gaps:
+        print(
+            f"  measures {gap['start_measure']}-{gap['end_measure']}"
+            f"  ({gap['start_seconds']:.1f}s-{gap['end_seconds']:.1f}s in the source audio)"
+        )
+
     print("\nIsolated extreme notes:")
     print(f"  before (transcription mode outlier flags): {raw_outlier_count}")
     print(f"  after (church mode, outside {LOW_READING_RANGE}-{HIGH_READING_RANGE} MIDI): {out_of_range_after}")
@@ -903,6 +1043,11 @@ def print_church_mode_report(
     if treble_stats["high_rest_measures"] or bass_stats["high_rest_measures"]:
         combined = sorted(set(treble_stats["high_rest_measures"]) | set(bass_stats["high_rest_measures"]))
         warnings.append(f"unusually many rests (>4) in {len(combined)} measure(s): {combined[:10]}{'...' if len(combined) > 10 else ''}")
+    for gap in melody_gaps:
+        warnings.append(
+            f"long RH melody gap, measures {gap['start_measure']}-{gap['end_measure']} "
+            f"({gap['start_seconds']:.1f}s-{gap['end_seconds']:.1f}s) -- verify against source audio"
+        )
 
     print(f"\n=== WARNINGS ({len(warnings)}) ===")
     for w in warnings:
@@ -985,5 +1130,6 @@ def run(
         trace,
         transcription_comparison,
         raw_outlier_count,
+        tempo_bpm,
     )
     return score
